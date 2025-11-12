@@ -15,8 +15,12 @@ from telegram.constants import ParseMode
 # --- ⚙️ CONFIGURATION ---
 BOT_TOKEN = "8434464254:AAE_LnvwnxwIPCvtwgBMFmTGm_k_o16M0W4"
 ADMIN_IDS = [7649568354]
-SUPPORT_USER_ID = 7649568354
+SUPPORT_USERNAME = "KHRsupportBot"
 REFERRAL_NOTIFICATION_GROUP = "https://t.me/+tIwH7ctrekc1YThl"
+
+# --- GROUP UNLIMITED SEARCH CONFIGURATION ---
+UNLIMITED_GROUP_ID = -1003229958982
+UNLIMITED_GROUP_LINK = "https://t.me/+iywmzmZQ7BVkZTll"
 
 # --- CHANNEL JOIN CONFIGURATION ---
 CHANNEL_1_INVITE_LINK = "https://t.me/VipinTheGodChild"
@@ -188,7 +192,11 @@ async def send_join_message(update: Update, context: CallbackContext):
     target = update.callback_query.message if update.callback_query else update.message
     await target.reply_text(message_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
 
-async def deduct_credits(user_id: int, cost: int = SEARCH_COST) -> bool:
+async def deduct_credits(user_id: int, chat_id: int = None, cost: int = SEARCH_COST) -> bool:
+    # Check if it's the unlimited group
+    if chat_id == UNLIMITED_GROUP_ID:
+        return True
+        
     if is_free_mode_active(): 
         return True
     if user_id in ADMIN_IDS or await is_premium(user_id): 
@@ -206,7 +214,11 @@ async def deduct_credits(user_id: int, cost: int = SEARCH_COST) -> bool:
         return True
     return False
     
-def get_info_footer(user_id: int) -> str:
+def get_info_footer(user_id: int, chat_id: int = None) -> str:
+    # Check if it's the unlimited group
+    if chat_id == UNLIMITED_GROUP_ID:
+        return "\n\n🚀 <b>Group Unlimited Mode:</b> No credits were used for this search!"
+    
     if is_free_mode_active():
         return "\n\n✨ <b>Free Mode is ACTIVE!</b> No credits were used for this search."
     
@@ -283,9 +295,52 @@ async def notify_admin_group(context: CallbackContext, referrer_name: str, new_u
 
 async def start(update: Update, context: CallbackContext) -> None:
     user = update.effective_user
+    chat = update.effective_chat
+    
     if await is_banned(user.id): 
         return
 
+    # Skip channel check for unlimited group
+    if chat.type != 'private' and chat.id == UNLIMITED_GROUP_ID:
+        # Group unlimited search mode
+        base_caption = (
+            "🚀 <b>Welcome to OSINT Bot - Group Unlimited Mode</b>\n\n"
+            "🔍 <b>Available Lookups:</b>\n"
+            "• Indian Phone Number 🇮🇳\n"
+            "• Pakistani Phone Number 🇵🇰\n"
+            "• Aadhaar ID 🆔\n"
+            "• Family Information 👨‍👩‍👧‍👦\n"
+            "• Vehicle Details 🚗\n"
+            "• Bank IFSC 🏦\n"
+            "• IP Lookup 🌐\n\n"
+            "💡 <b>Note:</b> In this group, you have <b>UNLIMITED FREE SEARCHES</b>! No credits required.\n\n"
+            "⚠️ <b>Important:</b> For personal use with credit system, use the bot in private chat."
+        )
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("India Number 🇮🇳", callback_data='search_phone'),
+                InlineKeyboardButton("Pak Number 🇵🇰", callback_data='search_pak_phone')
+            ],
+            [
+                InlineKeyboardButton("Aadhaar ID 🆔", callback_data='search_aadhaar'),
+                InlineKeyboardButton("Family Info 👨‍👩‍👧‍👦", callback_data='search_family')
+            ],
+            [
+                InlineKeyboardButton("Vehicle 🚗", callback_data='search_vehicle'),
+                InlineKeyboardButton("Bank IFSC 🏦", callback_data='search_ifsc')
+            ],
+            [
+                InlineKeyboardButton("IP Lookup 🌐", callback_data='search_ip'),
+                InlineKeyboardButton("Private Bot 🤖", url=f"https://t.me/{(await context.bot.get_me()).username}")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(base_caption, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        return
+
+    # Private chat logic with channel check
     if not await is_subscribed(user.id, context):
         await send_join_message(update, context)
         return
@@ -301,22 +356,46 @@ async def start(update: Update, context: CallbackContext) -> None:
     )
     final_caption = ""
 
-    if user_id_str not in user_data:
+    # FIXED REFERRAL SYSTEM - Load fresh data for referral processing
+    fresh_user_data = load_data(USER_DATA_FILE)
+    
+    if user_id_str not in fresh_user_data:
         referrer_id = None
         if context.args and context.args[0].isdigit():
             potential_referrer_id = int(context.args[0])
-            if str(potential_referrer_id) in user_data and potential_referrer_id != user.id:
+            potential_referrer_str = str(potential_referrer_id)
+            
+            # Check if referrer exists and is not the same user
+            if potential_referrer_str in fresh_user_data and potential_referrer_id != user.id:
                 referrer_id = potential_referrer_id
                 
-                add_referral_credit(referrer_id, REFERRAL_CREDITS)
-                new_referral_count = increment_referral_count(referrer_id)
+                # Add referral credits to referrer
+                fresh_user_data[potential_referrer_str]["credits"] += REFERRAL_CREDITS
                 
+                # Increment referral count
+                if "referral_count" not in fresh_user_data[potential_referrer_str]:
+                    fresh_user_data[potential_referrer_str]["referral_count"] = 0
+                fresh_user_data[potential_referrer_str]["referral_count"] += 1
+                new_referral_count = fresh_user_data[potential_referrer_str]["referral_count"]
+                
+                # Check for tier rewards
                 if new_referral_count == REFERRAL_TIER_1_COUNT:
-                    add_premium_days(referrer_id, REFERRAL_PREMIUM_DAYS)
+                    # Add 1 day premium for reaching 2 referrals
+                    premium_until = datetime.now() + timedelta(days=REFERRAL_PREMIUM_DAYS)
+                    fresh_user_data[potential_referrer_str]["premium_until"] = premium_until.isoformat()
                 
+                # Save the updated user data with referral rewards
+                save_data(fresh_user_data, USER_DATA_FILE)
+                
+                # Get referrer's name for notification
+                try:
+                    referrer_chat = await context.bot.get_chat(referrer_id)
+                    referrer_name = referrer_chat.first_name or f"User {referrer_id}"
+                except:
+                    referrer_name = f"User {referrer_id}"
+                
+                # Send notifications
                 await notify_referral_success(context, referrer_id, user.first_name, new_referral_count)
-                referrer_data = user_data.get(str(referrer_id), {})
-                referrer_name = f"User {referrer_id}"
                 await notify_admin_group(context, referrer_name, user.first_name, new_referral_count)
                     
                 try:
@@ -327,7 +406,8 @@ async def start(update: Update, context: CallbackContext) -> None:
                 except Exception as e:
                     logger.warning(f"Could not notify new user about referral: {e}")
                     
-        user_data[user_id_str] = {
+        # Create new user account
+        fresh_user_data[user_id_str] = {
             "credits": INITIAL_CREDITS, 
             "referred_by": referrer_id, 
             "redeemed_codes": [], 
@@ -336,7 +416,7 @@ async def start(update: Update, context: CallbackContext) -> None:
         }
         final_caption = (f"<b>🎉 Welcome, {user.first_name}!</b>\n\n"
                          f"You have <b>{INITIAL_CREDITS} free credits</b> to get started.\n\n{base_caption}")
-        save_data(user_data, USER_DATA_FILE)
+        save_data(fresh_user_data, USER_DATA_FILE)
         log_user_action(user.id, "Joined", f"Referred by: {referrer_id}")
     else:
         final_caption = f"<b>👋 Welcome back, {user.first_name}!</b>\n\n{base_caption}"
@@ -363,7 +443,8 @@ async def start(update: Update, context: CallbackContext) -> None:
             InlineKeyboardButton("Redeem Code 🎁", callback_data='redeem_code')
         ],
         [
-            InlineKeyboardButton("Support 👨‍💻", callback_data='support')
+            InlineKeyboardButton("Support 👨‍💻", callback_data='support'),
+            InlineKeyboardButton("Unlimited Group 🚀", url=UNLIMITED_GROUP_LINK)
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -377,6 +458,7 @@ async def start(update: Update, context: CallbackContext) -> None:
 async def button_handler(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
     user = query.from_user
+    chat = query.message.chat
     await query.answer()
 
     if await is_banned(user.id): 
@@ -389,6 +471,37 @@ async def button_handler(update: Update, context: CallbackContext) -> None:
         await handle_admin_panel(update, context)
         return
 
+    # Group unlimited mode - skip subscription check
+    if chat.type != 'private' and chat.id == UNLIMITED_GROUP_ID:
+        # Handle group searches without credit deduction
+        actions = {
+            'search_phone': ('awaiting_phone', "➡️ Send me the 10-digit Indian mobile number."),
+            'search_pak_phone': ('awaiting_pak_phone', "➡️ Send me the 12-digit Pakistani number (e.g., 923xxxxxxxxx)."),
+            'search_aadhaar': ('awaiting_aadhaar', "➡️ Send me the 12-digit Aadhaar number."),
+            'search_family': ('awaiting_family', "➡️ Send me the 12-digit Aadhaar number to fetch family information."),
+            'search_vehicle': ('awaiting_vehicle', "➡️ Send me the vehicle registration number (e.g., DL12AB1234)."),
+            'search_ifsc': ('awaiting_ifsc', "➡️ Send me the bank IFSC code."),
+            'search_ip': ('awaiting_ip', "➡️ Send me the IP address you want to look up."),
+        }
+
+        if query.data in actions:
+            state, message = actions[query.data]
+            context.user_data['state'] = state
+            await query.message.reply_text(f"🚀 {message}\n\n💡 <b>Group Unlimited Mode:</b> No credits required!", parse_mode=ParseMode.HTML)
+        elif query.data == 'check_credit':
+            await query.answer("💡 In group mode, you have UNLIMITED searches! No credits needed.", show_alert=True)
+        elif query.data == 'get_referral':
+            await query.answer("💡 Group mode doesn't use referral system.", show_alert=True)
+        elif query.data == 'redeem_code':
+            await query.answer("💡 Group mode doesn't require redeem codes.", show_alert=True)
+        elif query.data == 'support':
+            support_text = "Click the button below to contact the admin directly for any help or queries."
+            # CHANGED: Fixed support URL to use http instead of https
+            keyboard = [[InlineKeyboardButton("Contact Admin 👨‍💻", url="http://t.me/KHRsupportBot")]]
+            await query.message.reply_text(support_text, reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    # Private chat logic with subscription check
     if query.data == 'verify_join':
         if await is_subscribed(user.id, context):
             await query.message.delete()
@@ -474,11 +587,14 @@ async def button_handler(update: Update, context: CallbackContext) -> None:
         await query.message.reply_text(message_text, parse_mode=ParseMode.HTML)
     elif query.data == 'support':
         support_text = "Click the button below to contact the admin directly for any help or queries."
-        keyboard = [[InlineKeyboardButton("Contact Admin 👨‍💻", url=f"tg://user?id={SUPPORT_USER_ID}")]]
+        # CHANGED: Fixed support URL to use http instead of https
+        keyboard = [[InlineKeyboardButton("Contact Admin 👨‍💻", url="http://t.me/KHRsupportBot")]]
         await query.message.reply_text(support_text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_message(update: Update, context: CallbackContext) -> None:
     user = update.effective_user
+    chat = update.effective_chat
+    
     if await is_banned(user.id): 
         return
     
@@ -486,6 +602,31 @@ async def handle_message(update: Update, context: CallbackContext) -> None:
         await handle_admin_message(update, context)
         return
 
+    # Group unlimited mode - skip subscription and credit checks
+    if chat.type != 'private' and chat.id == UNLIMITED_GROUP_ID:
+        state = context.user_data.get('state')
+        
+        lookup_map = {
+            'awaiting_phone': perform_phone_lookup,
+            'awaiting_pak_phone': perform_pak_phone_lookup,
+            'awaiting_aadhaar': perform_aadhaar_lookup,
+            'awaiting_family': perform_family_lookup,
+            'awaiting_vehicle': perform_vehicle_lookup,
+            'awaiting_ifsc': perform_ifsc_lookup,
+            'awaiting_ip': perform_ip_lookup,
+        }
+
+        if state in lookup_map:
+            await lookup_map[state](update, context)
+        else:
+            # Show menu if no state
+            await start(update, context)
+        
+        if 'state' in context.user_data:
+            del context.user_data['state']
+        return
+
+    # Private chat logic with subscription check
     if not await is_subscribed(user.id, context):
         await send_join_message(update, context)
         return
@@ -497,7 +638,7 @@ async def handle_message(update: Update, context: CallbackContext) -> None:
         return
 
     if state and 'awaiting' in state and state not in ['awaiting_redeem_code']:
-        if not await deduct_credits(user.id):
+        if not await deduct_credits(user.id, chat.id):
             await update.message.reply_text(f"❌ You don't have enough credits. Each search costs {SEARCH_COST} credit.")
             if 'state' in context.user_data: 
                 del context.user_data['state']
@@ -551,32 +692,34 @@ async def perform_phone_lookup(update: Update, context: CallbackContext):
                 
                 await update.message.reply_document(
                     document=open(filename, 'rb'),
-                    caption=f"📱 <b>Phone Details for {phone_number}</b>\n\nResponse too long, sent as file." + get_info_footer(update.effective_user.id),
+                    caption=f"📱 <b>Phone Details for {phone_number}</b>\n\nResponse too long, sent as file." + get_info_footer(update.effective_user.id, update.effective_chat.id),
                     parse_mode=ParseMode.HTML
                 )
                 os.remove(filename)
             else:
                 result_text = f"📱 <b>Phone Details for <code>{html.escape(phone_number)}</code></b>\n\n<pre>{html.escape(formatted_data)}</pre>"
-                result_text += get_info_footer(update.effective_user.id)
+                result_text += get_info_footer(update.effective_user.id, update.effective_chat.id)
                 await sent_message.edit_text(result_text, parse_mode=ParseMode.HTML)
         else:
             user_data = load_data(USER_DATA_FILE)
             user_id_str = str(update.effective_user.id)
-            if user_id_str in user_data and not (update.effective_user.id in ADMIN_IDS or await is_premium(update.effective_user.id)):
+            # Only refund credits if not in group mode and not free mode
+            if user_id_str in user_data and update.effective_chat.id != UNLIMITED_GROUP_ID and not (update.effective_user.id in ADMIN_IDS or await is_premium(update.effective_user.id)) and not is_free_mode_active():
                 user_data[user_id_str]["credits"] += SEARCH_COST
                 save_data(user_data, USER_DATA_FILE)
             
-            await sent_message.edit_text("🤷 No details found for this number. No credits were deducted." + get_info_footer(update.effective_user.id))
+            await sent_message.edit_text("🤷 No details found for this number." + get_info_footer(update.effective_user.id, update.effective_chat.id))
             
     except Exception as e:
         logger.error(f"Phone API Error: {e}")
         user_data = load_data(USER_DATA_FILE)
         user_id_str = str(update.effective_user.id)
-        if user_id_str in user_data and not (update.effective_user.id in ADMIN_IDS or await is_premium(update.effective_user.id)):
+        # Only refund credits if not in group mode and not free mode
+        if user_id_str in user_data and update.effective_chat.id != UNLIMITED_GROUP_ID and not (update.effective_user.id in ADMIN_IDS or await is_premium(update.effective_user.id)) and not is_free_mode_active():
             user_data[user_id_str]["credits"] += SEARCH_COST
             save_data(user_data, USER_DATA_FILE)
         
-        await sent_message.edit_text("🔌 The Indian phone search service is having issues. Please try again later. No credits were deducted.")
+        await sent_message.edit_text("🔌 The Indian phone search service is having issues. Please try again later." + get_info_footer(update.effective_user.id, update.effective_chat.id))
 
 async def perform_pak_phone_lookup(update: Update, context: CallbackContext):
     phone_number = update.message.text.strip()
@@ -608,25 +751,27 @@ async def perform_pak_phone_lookup(update: Update, context: CallbackContext):
                           f"🆔 <b>CNIC:</b> {cnic}\n"
                           f"🏠 <b>Address:</b> {address}\n\n")
             
-            result_text += get_info_footer(update.effective_user.id)
+            result_text += get_info_footer(update.effective_user.id, update.effective_chat.id)
             await sent_message.edit_text(result_text, parse_mode=ParseMode.HTML)
         else:
             user_data = load_data(USER_DATA_FILE)
             user_id_str = str(update.effective_user.id)
-            if user_id_str in user_data and not (update.effective_user.id in ADMIN_IDS or await is_premium(update.effective_user.id)):
+            # Only refund credits if not in group mode and not free mode
+            if user_id_str in user_data and update.effective_chat.id != UNLIMITED_GROUP_ID and not (update.effective_user.id in ADMIN_IDS or await is_premium(update.effective_user.id)) and not is_free_mode_active():
                 user_data[user_id_str]["credits"] += SEARCH_COST
                 save_data(user_data, USER_DATA_FILE)
                 
-            await sent_message.edit_text("🤷 No details found for this Pakistani number. No credits were deducted." + get_info_footer(update.effective_user.id))
+            await sent_message.edit_text("🤷 No details found for this Pakistani number." + get_info_footer(update.effective_user.id, update.effective_chat.id))
     except Exception as e:
         logger.error(f"Pak Phone API Error: {e}")
         user_data = load_data(USER_DATA_FILE)
         user_id_str = str(update.effective_user.id)
-        if user_id_str in user_data and not (update.effective_user.id in ADMIN_IDS or await is_premium(update.effective_user.id)):
+        # Only refund credits if not in group mode and not free mode
+        if user_id_str in user_data and update.effective_chat.id != UNLIMITED_GROUP_ID and not (update.effective_user.id in ADMIN_IDS or await is_premium(update.effective_user.id)) and not is_free_mode_active():
             user_data[user_id_str]["credits"] += SEARCH_COST
             save_data(user_data, USER_DATA_FILE)
             
-        await sent_message.edit_text("🔌 The Pakistani number search service is having issues. Please try again later. No credits were deducted.")
+        await sent_message.edit_text("🔌 The Pakistani number search service is having issues. Please try again later." + get_info_footer(update.effective_user.id, update.effective_chat.id))
 
 async def perform_aadhaar_lookup(update: Update, context: CallbackContext):
     aadhaar_number = update.message.text.strip()
@@ -654,19 +799,19 @@ async def perform_aadhaar_lookup(update: Update, context: CallbackContext):
                 
                 await update.message.reply_document(
                     document=open(filename, 'rb'),
-                    caption=f"🆔 <b>Aadhaar Details for {aadhaar_number}</b>\n\nJSON response sent as file." + get_info_footer(update.effective_user.id),
+                    caption=f"🆔 <b>Aadhaar Details for {aadhaar_number}</b>\n\nJSON response sent as file." + get_info_footer(update.effective_user.id, update.effective_chat.id),
                     parse_mode=ParseMode.HTML
                 )
                 os.remove(filename)
             else:
                 result_text = f"🆔 <b>Aadhaar Details for <code>{html.escape(aadhaar_number)}</code></b>\n\n<pre>{html.escape(formatted_data)}</pre>"
-                result_text += get_info_footer(update.effective_user.id)
+                result_text += get_info_footer(update.effective_user.id, update.effective_chat.id)
                 await sent_message.edit_text(result_text, parse_mode=ParseMode.HTML)
         else:
-            await sent_message.edit_text("🤷 No details found for this Aadhaar number." + get_info_footer(update.effective_user.id))
+            await sent_message.edit_text("🤷 No details found for this Aadhaar number." + get_info_footer(update.effective_user.id, update.effective_chat.id))
     except Exception as e:
         logger.error(f"Aadhaar API Error: {e}")
-        await sent_message.edit_text("🔌 The Aadhaar search service is having issues. Please try again later.")
+        await sent_message.edit_text("🔌 The Aadhaar search service is having issues. Please try again later." + get_info_footer(update.effective_user.id, update.effective_chat.id))
 
 async def perform_family_lookup(update: Update, context: CallbackContext):
     aadhaar_number = update.message.text.strip()
@@ -694,19 +839,19 @@ async def perform_family_lookup(update: Update, context: CallbackContext):
                 
                 await update.message.reply_document(
                     document=open(filename, 'rb'),
-                    caption=f"👨‍👩‍👧‍👦 <b>Family Info for Aadhaar {aadhaar_number}</b>\n\nResponse too long, sent as file." + get_info_footer(update.effective_user.id),
+                    caption=f"👨‍👩‍👧‍👦 <b>Family Info for Aadhaar {aadhaar_number}</b>\n\nResponse too long, sent as file." + get_info_footer(update.effective_user.id, update.effective_chat.id),
                     parse_mode=ParseMode.HTML
                 )
                 os.remove(filename)
             else:
                 result_text = f"👨‍👩‍👧‍👦 <b>Family Information for <code>{html.escape(aadhaar_number)}</code></b>\n\n<pre>{html.escape(formatted_data)}</pre>"
-                result_text += get_info_footer(update.effective_user.id)
+                result_text += get_info_footer(update.effective_user.id, update.effective_chat.id)
                 await sent_message.edit_text(result_text, parse_mode=ParseMode.HTML)
         else:
-            await sent_message.edit_text("🤷 No family information found for this Aadhaar number." + get_info_footer(update.effective_user.id))
+            await sent_message.edit_text("🤷 No family information found for this Aadhaar number." + get_info_footer(update.effective_user.id, update.effective_chat.id))
     except Exception as e:
         logger.error(f"Family Info API Error: {e}")
-        await sent_message.edit_text("🔌 The family information service is having issues. Please try again later.")
+        await sent_message.edit_text("🔌 The family information service is having issues. Please try again later." + get_info_footer(update.effective_user.id, update.effective_chat.id))
 
 async def perform_vehicle_lookup(update: Update, context: CallbackContext):
     rc_number = update.message.text.strip().upper()
@@ -730,21 +875,21 @@ async def perform_vehicle_lookup(update: Update, context: CallbackContext):
                 
                 await update.message.reply_document(
                     document=open(filename, 'rb'),
-                    caption=f"🚗 <b>Vehicle Details for {rc_number}</b>\n\nResponse too long, sent as file." + get_info_footer(update.effective_user.id),
+                    caption=f"🚗 <b>Vehicle Details for {rc_number}</b>\n\nResponse too long, sent as file." + get_info_footer(update.effective_user.id, update.effective_chat.id),
                     parse_mode=ParseMode.HTML
                 )
                 os.remove(filename)
             else:
                 result_text = f"🚗 <b>Vehicle Details for <code>{html.escape(rc_number)}</code></b>\n\n<pre>{html.escape(formatted_data)}</pre>"
-                result_text += get_info_footer(update.effective_user.id)
+                result_text += get_info_footer(update.effective_user.id, update.effective_chat.id)
                 await sent_message.edit_text(result_text, parse_mode=ParseMode.HTML)
         else:
-            await sent_message.edit_text(f"🤷 No details found for <code>{html.escape(rc_number)}</code>." + get_info_footer(update.effective_user.id), parse_mode=ParseMode.HTML)
+            await sent_message.edit_text(f"🤷 No details found for <code>{html.escape(rc_number)}</code>." + get_info_footer(update.effective_user.id, update.effective_chat.id), parse_mode=ParseMode.HTML)
     except requests.exceptions.HTTPError:
-        await sent_message.edit_text(f"🤷 No details found for <code>{html.escape(rc_number)}</code>." + get_info_footer(update.effective_user.id), parse_mode=ParseMode.HTML)
+        await sent_message.edit_text(f"🤷 No details found for <code>{html.escape(rc_number)}</code>." + get_info_footer(update.effective_user.id, update.effective_chat.id), parse_mode=ParseMode.HTML)
     except Exception as e:
         logger.error(f"Vehicle API Error: {e}")
-        await sent_message.edit_text("🔌 The vehicle search service is having issues. Please try again later.")
+        await sent_message.edit_text("🔌 The vehicle search service is having issues. Please try again later." + get_info_footer(update.effective_user.id, update.effective_chat.id))
 
 async def perform_ifsc_lookup(update: Update, context: CallbackContext):
     ifsc_code = update.message.text.strip().upper()
@@ -758,16 +903,16 @@ async def perform_ifsc_lookup(update: Update, context: CallbackContext):
         cleaned_data = {k: v for k, v in data.items() if k not in ['credit', 'developer']}
         full_details = json.dumps(cleaned_data, indent=2, ensure_ascii=False)
         result_text = f"🏦 <b>Bank Branch Details</b>\n\n<pre>{html.escape(full_details)}</pre>"
-        result_text += get_info_footer(update.effective_user.id)
+        result_text += get_info_footer(update.effective_user.id, update.effective_chat.id)
         await sent_message.edit_text(result_text, parse_mode=ParseMode.HTML)
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 404:
-            await sent_message.edit_text(f"🤷 No details found for IFSC: <code>{ifsc_code}</code>." + get_info_footer(update.effective_user.id), parse_mode=ParseMode.HTML)
+            await sent_message.edit_text(f"🤷 No details found for IFSC: <code>{ifsc_code}</code>." + get_info_footer(update.effective_user.id, update.effective_chat.id), parse_mode=ParseMode.HTML)
         else:
-            await sent_message.edit_text("🔌 The IFSC search service is having issues." + get_info_footer(update.effective_user.id))
+            await sent_message.edit_text("🔌 The IFSC search service is having issues." + get_info_footer(update.effective_user.id, update.effective_chat.id))
     except Exception as e:
         logger.error(f"IFSC General Error: {e}")
-        await sent_message.edit_text("🔌 The IFSC search service is currently unavailable.")
+        await sent_message.edit_text("🔌 The IFSC search service is currently unavailable." + get_info_footer(update.effective_user.id, update.effective_chat.id))
 
 async def perform_ip_lookup(update: Update, context: CallbackContext):
     ip_address = update.message.text.strip()
@@ -782,13 +927,13 @@ async def perform_ip_lookup(update: Update, context: CallbackContext):
             cleaned_data = {k: v for k, v in data.items() if k not in ['credit', 'developer']}
             full_details = json.dumps(cleaned_data, indent=2, ensure_ascii=False)
             result_text = f"🌐 <b>IP Address Information</b>\n\n<pre>{html.escape(full_details)}</pre>"
-            result_text += get_info_footer(update.effective_user.id)
+            result_text += get_info_footer(update.effective_user.id, update.effective_chat.id)
             await sent_message.edit_text(result_text, parse_mode=ParseMode.HTML)
         else:
-            await sent_message.edit_text(f"🤷 Invalid IP or no details for: <code>{ip_address}</code>." + get_info_footer(update.effective_user.id), parse_mode=ParseMode.HTML)
+            await sent_message.edit_text(f"🤷 Invalid IP or no details for: <code>{ip_address}</code>." + get_info_footer(update.effective_user.id, update.effective_chat.id), parse_mode=ParseMode.HTML)
     except Exception as e:
         logger.error(f"IP API Error: {e}")
-        await sent_message.edit_text("🔌 The IP lookup service is having issues. Please try again later.")
+        await sent_message.edit_text("🔌 The IP lookup service is having issues. Please try again later." + get_info_footer(update.effective_user.id, update.effective_chat.id))
 
 # --- Redeem Code Logic ---
 async def process_redeem_code(code_text: str, update: Update, context: CallbackContext):
@@ -954,7 +1099,10 @@ async def handle_admin_panel(update: Update, context: CallbackContext) -> None:
             
             f"<b>Credits:</b>\n"
             f"💰 Total Credits in System: <b>{sum(user.get('credits', 0) for user in user_data.values())}</b>\n"
-            f"🎁 Available in Codes: <b>{total_credits_in_codes}</b>"
+            f"🎁 Available in Codes: <b>{total_credits_in_codes}</b>\n\n"
+            
+            f"<b>Group Mode:</b>\n"
+            f"🚀 Unlimited Group: <b>Active</b> (ID: {UNLIMITED_GROUP_ID})"
         )
         await query.message.edit_text(stats_message, reply_markup=get_admin_panel_keyboard(), parse_mode=ParseMode.HTML)
     
@@ -1228,58 +1376,23 @@ def main() -> None:
             save_data(default_data, f)
 
     application = Application.builder().token(BOT_TOKEN).build()
-    private_filter = filters.ChatType.PRIVATE
     
-    application.add_handler(CommandHandler("start", start, filters=private_filter))
-    application.add_handler(CommandHandler("redeem", redeem_command, filters=private_filter))
+    # Add handlers for both private and group chats
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("redeem", redeem_command, filters=filters.ChatType.PRIVATE))
     
-    application.add_handler(CommandHandler("admin", admin_panel, filters=filters.User(ADMIN_IDS) & private_filter))
-    application.add_handler(CommandHandler("gencode", gencode, filters=filters.User(ADMIN_IDS) & private_filter))
+    application.add_handler(CommandHandler("admin", admin_panel, filters=filters.User(ADMIN_IDS) & filters.ChatType.PRIVATE))
+    application.add_handler(CommandHandler("gencode", gencode, filters=filters.User(ADMIN_IDS) & filters.ChatType.PRIVATE))
     
     application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & private_filter, handle_message))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("🚀 Enhanced OSINT Bot is running...")
     print("🔍 Features: Aadhaar JSON, Family Info, Advanced Referral System")
     print("👑 Admin Panel: Full management with referral stats")
     print("🔗 Referral System: Tier-based rewards with group notifications")
+    print(f"🚀 Group Unlimited Mode: ACTIVE (Group ID: {UNLIMITED_GROUP_ID})")
     application.run_polling()
 
 if __name__ == '__main__':
-    main()es: {uses}",
-            parse_mode='Markdown'
-        )
-    except (IndexError, ValueError):
-        await update.message.reply_text("⚠️ Usage: `/gencode <credits> <uses>`")
-
-def main() -> None:
-    # Initialize data files
-    for f in [USER_DATA_FILE, REDEEM_CODES_FILE, BANNED_USERS_FILE, PREMIUM_USERS_FILE, FREE_MODE_FILE, USER_HISTORY_FILE]:
-        if not os.path.exists(f):
-            default_data = {}
-            if 'banned' in f or 'premium' in f: default_data = []
-            elif 'free_mode' in f: default_data = {"active": False}
-            save_data(default_data, f)
-
-    application = Application.builder().token(BOT_TOKEN).build()
-    private_filter = filters.ChatType.PRIVATE
-    
-    application.add_handler(CommandHandler("start", start, filters=private_filter))
-    application.add_handler(CommandHandler("redeem", redeem_command, filters=private_filter))
-    
-    application.add_handler(CommandHandler("admin", admin_panel, filters=filters.User(ADMIN_IDS) & private_filter))
-    application.add_handler(CommandHandler("gencode", gencode, filters=filters.User(ADMIN_IDS) & private_filter))
-    
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & private_filter, handle_message))
-
-    print("🚀 Enhanced OSINT Bot is running...")
-    print("🔍 Features: Aadhaar JSON, Family Info, Advanced Referral System")
-    print("👑 Admin Panel: Full management with referral stats")
-    print("🔗 Referral System: Tier-based rewards with group notifications")
-    application.run_polling()
-
-if __name__ == '__main__':
-    main()
-== '__main__':
     main()
